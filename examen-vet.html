@@ -966,14 +966,9 @@ REQUISITOS:
     const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!rawText) throw new Error('Respuesta vacía de Gemini');
 
-    // Parse JSON — strip possible markdown fences
-    const clean = rawText.replace(/```json|```/g, '').trim();
-    const start = clean.indexOf('[');
-    const end = clean.lastIndexOf(']');
-    if (start === -1 || end === -1) throw new Error('No se encontró JSON válido en la respuesta');
-
-    questions = JSON.parse(clean.slice(start, end + 1));
-    if (!Array.isArray(questions) || questions.length === 0) throw new Error('El JSON generado no contiene preguntas');
+    // Robust JSON parsing
+    questions = parseQuestionsFromText(rawText);
+    if (!Array.isArray(questions) || questions.length === 0) throw new Error('No se pudieron extraer preguntas. Inténtalo de nuevo.');
 
     // Start exam
     currentQ = 0;
@@ -1125,6 +1120,49 @@ function showConfig() {
   document.getElementById('config-panel').style.display = 'block';
   document.getElementById('btn-generate').disabled = false;
   window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function parseQuestionsFromText(text) {
+  // 1. Strip markdown fences
+  let clean = text.replace(/```json[\s\S]*?```/g, m => m.replace(/```json|```/g, ''))
+                  .replace(/```/g, '')
+                  .trim();
+
+  // 2. Find outermost array
+  const start = clean.indexOf('[');
+  const end = clean.lastIndexOf(']');
+  if (start === -1 || end === -1) throw new Error('No se encontró un array JSON en la respuesta');
+  clean = clean.slice(start, end + 1);
+
+  // 3. Fix common Gemini JSON issues:
+  // - Trailing commas before } or ]
+  clean = clean.replace(/,(\s*[}\]])/g, '$1');
+  // - Unescaped newlines inside strings
+  clean = clean.replace(/"([^"]*)"/g, (match) => {
+    return match.replace(/
+/g, '\n').replace(/
+/g, '\r').replace(/	/g, '\t');
+  });
+
+  // 4. Try direct parse first
+  try {
+    return JSON.parse(clean);
+  } catch(e1) {
+    // 5. Extract objects one by one as fallback
+    const items = [];
+    const objRegex = /\{[\s\S]*?\}/g;
+    let match;
+    while ((match = objRegex.exec(clean)) !== null) {
+      try {
+        const obj = JSON.parse(match[0].replace(/,(\s*[}\]])/g, '$1'));
+        if (obj.pregunta && obj.opciones && typeof obj.correcta === 'number') {
+          items.push(obj);
+        }
+      } catch(e2) { /* skip malformed object */ }
+    }
+    if (items.length > 0) return items;
+    throw new Error('JSON malformado: ' + e1.message);
+  }
 }
 
 // Init
