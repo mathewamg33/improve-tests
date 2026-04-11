@@ -933,7 +933,7 @@ REQUISITOS:
 - Preguntas variadas: diagnóstico, tratamiento, fisiopatología, farmacología, valores de referencia
 - Dificultad mixta: algunas fáciles, la mayoría intermedias, algunas difíciles
 - Explicaciones claras y útiles para el estudio
-- Solo JSON, nada más`;
+- CRÍTICO: devuelve SOLO el array JSON. Sin texto antes ni después. Sin comillas especiales. Usa solo comillas dobles estándar. No uses saltos de línea dentro de los valores de string.`;
 
     const body = {
       contents: [{
@@ -1124,44 +1124,45 @@ function showConfig() {
 
 function parseQuestionsFromText(text) {
   // 1. Strip markdown fences
-  let clean = text.replace(/```json[\s\S]*?```/g, m => m.replace(/```json|```/g, ''))
-                  .replace(/```/g, '')
-                  .trim();
+  let clean = text.replace(/`{3}json/g, '').replace(/`{3}/g, '').trim();
 
   // 2. Find outermost array
   const start = clean.indexOf('[');
   const end = clean.lastIndexOf(']');
-  if (start === -1 || end === -1) throw new Error('No se encontró un array JSON en la respuesta');
+  if (start === -1 || end === -1) throw new Error('No se encontró JSON en la respuesta');
   clean = clean.slice(start, end + 1);
 
-  // 3. Fix common Gemini JSON issues:
-  // - Trailing commas before } or ]
-  clean = clean.replace(/,(\s*[}\]])/g, '$1');
-  // - Unescaped newlines inside strings
-  clean = clean.replace(/"([^"]*)"/g, (match) => {
-    return match.replace(/
-/g, '\n').replace(/
-/g, '\r').replace(/	/g, '\t');
-  });
+  // 3. Remove trailing commas (common Gemini issue)
+  clean = clean.replace(/,(\s*[\]}])/g, '$1');
 
-  // 4. Try direct parse first
+  // 4. Try direct parse
   try {
     return JSON.parse(clean);
   } catch(e1) {
-    // 5. Extract objects one by one as fallback
+    // 5. Fallback: split by question objects manually
     const items = [];
-    const objRegex = /\{[\s\S]*?\}/g;
-    let match;
-    while ((match = objRegex.exec(clean)) !== null) {
-      try {
-        const obj = JSON.parse(match[0].replace(/,(\s*[}\]])/g, '$1'));
-        if (obj.pregunta && obj.opciones && typeof obj.correcta === 'number') {
-          items.push(obj);
+    let depth = 0;
+    let objStart = -1;
+    for (let i = 0; i < clean.length; i++) {
+      if (clean[i] === '{') {
+        if (depth === 0) objStart = i;
+        depth++;
+      } else if (clean[i] === '}') {
+        depth--;
+        if (depth === 0 && objStart !== -1) {
+          try {
+            const raw = clean.slice(objStart, i + 1).replace(/,(\s*[\]}])/g, '$1');
+            const obj = JSON.parse(raw);
+            if (obj.pregunta && obj.opciones && typeof obj.correcta === 'number') {
+              items.push(obj);
+            }
+          } catch(e2) {}
+          objStart = -1;
         }
-      } catch(e2) { /* skip malformed object */ }
+      }
     }
     if (items.length > 0) return items;
-    throw new Error('JSON malformado: ' + e1.message);
+    throw new Error('Error de formato en la respuesta. Inténtalo de nuevo.');
   }
 }
 
