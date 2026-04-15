@@ -602,6 +602,84 @@
     transform: translateY(-1px);
   }
 
+  /* Batch break panel */
+  #batch-break {
+    text-align: center;
+    padding: 48px 24px;
+    animation: fadeUp 0.4s ease;
+  }
+
+  .batch-break-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .batch-break-round {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .batch-break-score {
+    font-family: 'Fraunces', serif;
+    font-size: clamp(64px, 12vw, 96px);
+    font-weight: 900;
+    line-height: 1;
+    margin-bottom: 2px;
+  }
+
+  .batch-break-score.excellent { color: var(--accent); }
+  .batch-break-score.good { color: #f0c040; }
+  .batch-break-score.poor { color: var(--red); }
+
+  .batch-break-sublabel {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  .batch-break-next {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    color: var(--text-muted);
+    max-width: 420px;
+    line-height: 1.5;
+    margin-bottom: 20px;
+  }
+
+  .batch-mini-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    margin: 8px 0 20px;
+  }
+
+  .batch-progress-dots {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+
+  .batch-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: background 0.3s;
+  }
+
+  .batch-dot.done { background: var(--accent); }
+  .batch-dot.active { background: var(--accent); opacity: 0.5; }
+
   /* Error */
   .error-box {
     background: var(--red-dim);
@@ -749,6 +827,24 @@
     </div>
   </div>
 
+  <!-- BATCH BREAK (pantalla entre bloques de 10) -->
+  <div id="batch-break" style="display:none">
+    <div class="batch-break-inner">
+      <div class="batch-break-round" id="batch-block-num">Bloque 1 de 5 completado</div>
+      <div class="batch-progress-dots" id="batch-progress-dots"></div>
+      <div class="batch-break-score excellent" id="batch-block-score">8/10</div>
+      <div class="batch-break-sublabel">en este bloque</div>
+      <div class="batch-break-next" id="batch-break-next-topics"></div>
+      <div class="batch-mini-loading" id="batch-mini-loading" style="display:none">
+        <div class="spinner"></div>
+        <div class="loading-sub" id="batch-loading-sub">Generando preguntas...</div>
+      </div>
+      <button class="btn-retry" id="btn-continue" onclick="continueExam()">
+        Continuar con el siguiente bloque →
+      </button>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -807,11 +903,22 @@ const PDFS = [
   { id: 'ojo-rojo', name: 'Ojo Rojo Diferencial', file: '2.2 OJO ROJO DIFERENCIAL DEF.pdf' },
 ];
 
+const TOTAL_QUESTIONS = 50;
+const BLOCK_SIZE = 10;
+const NUM_BLOCKS = TOTAL_QUESTIONS / BLOCK_SIZE; // 5
+
 let questions = [];
 let currentQ = 0;
 let score = 0;
 let wrongCount = 0;
 let answered = false;
+
+let batchPlan = [];       // 5 arrays of PDFs, one per block
+let currentBatch = 0;    // 0–4
+let examApiKey = '';
+let blockStartScore = 0;
+let blockStartWrong = 0;
+let allSelectedPdfs = [];
 
 // Init topic grid
 function initTopics() {
@@ -870,20 +977,116 @@ async function fetchPdfAsBase64(url) {
   return btoa(binary);
 }
 
+// Divide un array en exactamente n chunks (los últimos pueden quedar vacíos si hay pocos elementos)
+function chunkIntoN(arr, n) {
+  const shuffled = [...arr].sort(() => Math.random() - 0.5);
+  const result = [];
+  const size = Math.ceil(shuffled.length / n);
+  for (let i = 0; i < shuffled.length; i += size) {
+    result.push(shuffled.slice(i, i + size));
+  }
+  while (result.length < n) result.push([]);
+  return result;
+}
+
+async function generateBatch(batchIdx, loadingSubEl) {
+  const batch = batchPlan[batchIdx];
+  const batchNum = batchIdx + 1;
+  const allTopics = allSelectedPdfs.map(p => p.name).join(', ');
+
+  const parts = [];
+  if (batch.length > 0) {
+    loadingSubEl.textContent = `Bloque ${batchNum}/${NUM_BLOCKS} — Cargando documentos...`;
+    for (const pdf of batch) {
+      loadingSubEl.textContent = `Bloque ${batchNum}/${NUM_BLOCKS} — Leyendo: ${pdf.name}...`;
+      const url = getPdfUrl(pdf.file);
+      try {
+        const b64 = await fetchPdfAsBase64(url);
+        parts.push({ inlineData: { mimeType: 'application/pdf', data: b64 } });
+      } catch(e) {
+        console.warn(`No se pudo cargar ${pdf.file}:`, e);
+      }
+    }
+    if (parts.length === 0) {
+      console.warn(`Bloque ${batchNum}: ningún PDF cargado, usando solo nombres de temas.`);
+    }
+  }
+
+  const batchTopics = batch.length > 0 ? batch.map(p => p.name).join(', ') : allTopics;
+  loadingSubEl.textContent = `Bloque ${batchNum}/${NUM_BLOCKS} — Generando 10 preguntas...`;
+
+  const prompt = `Eres un profesor experto en veterinaria de urgencias y emergencias. Genera EXACTAMENTE 10 preguntas tipo test en español centradas en: ${batchTopics}.
+
+Contexto general del examen (temario completo): ${allTopics}.
+
+FORMATO — responde SOLO con el array JSON, sin texto adicional, sin markdown, sin backticks:
+[
+  {
+    "pregunta": "Texto de la pregunta sin saltos de linea",
+    "opciones": ["A) opción 1", "B) opción 2", "C) opción 3", "D) opción 4"],
+    "correcta": 0,
+    "explicacion": "Explicación concisa sin saltos de linea."
+  }
+]
+
+REQUISITOS:
+- EXACTAMENTE 10 preguntas
+- 4 opciones por pregunta (A, B, C, D)
+- "correcta" es el índice: 0=A, 1=B, 2=C, 3=D
+- Preguntas variadas: diagnóstico, tratamiento, fisiopatología, farmacología
+- Dificultad mixta
+- Solo JSON puro, sin backticks, sin texto antes ni después`;
+
+  const body = {
+    contents: [{ parts: [...parts, { text: prompt }] }],
+    generationConfig: {
+      temperature: 0.7,
+      maxOutputTokens: 8192,
+      responseMimeType: 'application/json',
+    }
+  };
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${examApiKey}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  );
+
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error?.message || `Error HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) throw new Error('Respuesta vacía de Gemini');
+
+  const parsed = parseQuestionsFromText(rawText);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error(`No se pudieron extraer preguntas del bloque ${batchNum}. Inténtalo de nuevo.`);
+  }
+  return parsed;
+}
+
 async function startExam() {
   hideError();
-  const apiKey = document.getElementById('api-key').value.trim();
-  if (!apiKey) { showError('Introduce tu API key de Gemini'); return; }
+  examApiKey = document.getElementById('api-key').value.trim();
+  if (!examApiKey) { showError('Introduce tu API key de Gemini'); return; }
 
   const selected = getSelectedPdfs();
   if (selected.length === 0) { showError('Selecciona al menos un tema'); return; }
 
-  // Save key locally
-  localStorage.setItem('gemini_key', apiKey);
+  localStorage.setItem('gemini_key', examApiKey);
 
-  // Pick up to 5 random PDFs to keep context manageable
-  const shuffled = [...selected].sort(() => Math.random() - 0.5);
-  const toLoad = shuffled.slice(0, Math.min(5, shuffled.length));
+  // Distribuir todos los PDFs en 5 bloques
+  allSelectedPdfs = selected;
+  batchPlan = chunkIntoN(selected, NUM_BLOCKS);
+  currentBatch = 0;
+  questions = [];
+  currentQ = 0;
+  score = 0;
+  wrongCount = 0;
+  blockStartScore = 0;
+  blockStartWrong = 0;
 
   document.getElementById('config-panel').style.display = 'none';
   document.getElementById('loading').style.display = 'block';
@@ -892,92 +1095,12 @@ async function startExam() {
   const loadingSub = document.getElementById('loading-sub');
 
   try {
-    loadingSub.textContent = `Cargando ${toLoad.length} documentos de Supabase...`;
+    const firstBatch = await generateBatch(0, loadingSub);
+    questions = firstBatch;
 
-    // Fetch PDFs
-    const parts = [];
-    for (const pdf of toLoad) {
-      loadingSub.textContent = `Leyendo: ${pdf.name}...`;
-      const url = getPdfUrl(pdf.file);
-      try {
-        const b64 = await fetchPdfAsBase64(url);
-        parts.push({
-          inlineData: { mimeType: 'application/pdf', data: b64 }
-        });
-      } catch(e) {
-        console.warn(`No se pudo cargar ${pdf.file}:`, e);
-      }
-    }
-
-    if (parts.length === 0) throw new Error('No se pudo cargar ningún PDF. Verifica que el bucket sea público.');
-
-    loadingSub.textContent = 'Generando 50 preguntas con Gemini...';
-
-    const topicNames = toLoad.map(p => p.name).join(', ');
-    const prompt = `Eres un profesor experto en veterinaria. Basándote ÚNICAMENTE en el contenido de los documentos PDF adjuntos sobre: ${topicNames}, genera exactamente 50 preguntas tipo test de nivel universitario en español.
-
-FORMATO ESTRICTO — responde SOLO con un array JSON válido, sin texto adicional, sin markdown, sin backticks:
-[
-  {
-    "pregunta": "Texto de la pregunta",
-    "opciones": ["A) opción 1", "B) opción 2", "C) opción 3", "D) opción 4"],
-    "correcta": 0,
-    "explicacion": "Explicación detallada de por qué la respuesta es correcta y por qué las demás son incorrectas."
-  }
-]
-
-REQUISITOS:
-- Exactamente 50 preguntas
-- 4 opciones por pregunta (A, B, C, D)
-- "correcta" es el índice (0=A, 1=B, 2=C, 3=D)
-- Preguntas variadas: diagnóstico, tratamiento, fisiopatología, farmacología, valores de referencia
-- Dificultad mixta: algunas fáciles, la mayoría intermedias, algunas difíciles
-- Explicaciones claras y útiles para el estudio
-- CRÍTICO: devuelve SOLO el array JSON. Sin texto antes ni después. Sin comillas especiales. Usa solo comillas dobles estándar. No uses saltos de línea dentro de los valores de string.`;
-
-    const body = {
-      contents: [{
-        parts: [
-          ...parts,
-          { text: prompt }
-        ]
-      }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 8192,
-      }
-    };
-
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      }
-    );
-
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error?.message || `Error HTTP ${res.status}`);
-    }
-
-    const data = await res.json();
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!rawText) throw new Error('Respuesta vacía de Gemini');
-
-    // Robust JSON parsing
-    questions = parseQuestionsFromText(rawText);
-    if (!Array.isArray(questions) || questions.length === 0) throw new Error('No se pudieron extraer preguntas. Inténtalo de nuevo.');
-
-    // Start exam
-    currentQ = 0;
-    score = 0;
-    wrongCount = 0;
     document.getElementById('loading').style.display = 'none';
     document.getElementById('exam-area').style.display = 'block';
     renderQuestion();
-
   } catch(e) {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('config-panel').style.display = 'block';
@@ -987,26 +1110,90 @@ REQUISITOS:
   }
 }
 
+function showBatchBreak() {
+  document.getElementById('exam-area').style.display = 'none';
+
+  const blockCorrect = score - blockStartScore;
+  const blockNum = currentBatch + 1;
+  const nextBatch = batchPlan[currentBatch + 1] || [];
+  const nextTopics = nextBatch.length > 0
+    ? nextBatch.map(p => p.name).join(', ')
+    : allSelectedPdfs.map(p => p.name).join(', ');
+
+  document.getElementById('batch-block-num').textContent = `Bloque ${blockNum} de ${NUM_BLOCKS} completado`;
+
+  const scoreEl = document.getElementById('batch-block-score');
+  scoreEl.textContent = `${blockCorrect}/10`;
+  scoreEl.className = 'batch-break-score ' + (blockCorrect >= 7 ? 'excellent' : blockCorrect >= 5 ? 'good' : 'poor');
+
+  document.getElementById('batch-break-next-topics').textContent =
+    `Próximo bloque — ${nextTopics}`;
+
+  // Renderizar puntos de progreso
+  const dotsEl = document.getElementById('batch-progress-dots');
+  dotsEl.innerHTML = Array.from({ length: NUM_BLOCKS }, (_, i) =>
+    `<div class="batch-dot ${i < blockNum ? 'done' : i === blockNum ? 'active' : ''}"></div>`
+  ).join('');
+
+  document.getElementById('btn-continue').style.display = 'inline-block';
+  document.getElementById('batch-mini-loading').style.display = 'none';
+  document.getElementById('batch-break').style.display = 'block';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function continueExam() {
+  document.getElementById('btn-continue').style.display = 'none';
+  document.getElementById('batch-mini-loading').style.display = 'flex';
+
+  currentBatch++;
+  blockStartScore = score;
+  blockStartWrong = wrongCount;
+
+  const loadingSub = document.getElementById('batch-loading-sub');
+
+  try {
+    const newBatch = await generateBatch(currentBatch, loadingSub);
+    questions.push(...newBatch);
+
+    document.getElementById('batch-break').style.display = 'none';
+    document.getElementById('exam-area').style.display = 'block';
+    renderQuestion();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch(e) {
+    document.getElementById('batch-mini-loading').style.display = 'none';
+    document.getElementById('btn-continue').style.display = 'inline-block';
+    document.getElementById('batch-loading-sub').textContent = 'Error al generar. Inténtalo de nuevo.';
+    console.error(e);
+  }
+}
+
 function renderQuestion() {
   const q = questions[currentQ];
-  const total = questions.length;
 
-  document.getElementById('progress-text').textContent = `${currentQ + 1} / ${total}`;
+  document.getElementById('progress-text').textContent = `${currentQ + 1} / ${TOTAL_QUESTIONS}`;
   document.getElementById('score-display').textContent = score;
   document.getElementById('stat-correct').textContent = score;
   document.getElementById('stat-wrong').textContent = wrongCount;
-  document.getElementById('stat-remaining').textContent = total - currentQ;
+  document.getElementById('stat-remaining').textContent = TOTAL_QUESTIONS - currentQ;
 
-  const pct = (currentQ / total) * 100;
+  const pct = (currentQ / TOTAL_QUESTIONS) * 100;
   document.getElementById('progress-bar').style.width = pct + '%';
 
   answered = false;
+
+  const isLastQuestion = currentQ === TOTAL_QUESTIONS - 1;
+  const isBlockEnd = (currentQ + 1) % BLOCK_SIZE === 0 && !isLastQuestion;
+  const nextBtnLabel = isLastQuestion
+    ? 'Ver resultados →'
+    : isBlockEnd
+      ? 'Siguiente bloque →'
+      : 'Siguiente pregunta →';
 
   const letters = ['A', 'B', 'C', 'D'];
   const container = document.getElementById('question-container');
   container.innerHTML = `
     <div class="question-card">
-      <div class="q-number">PREGUNTA ${currentQ + 1} DE ${total}</div>
+      <div class="q-number">PREGUNTA ${currentQ + 1} DE ${TOTAL_QUESTIONS}</div>
       <div class="q-text">${q.pregunta}</div>
       <div class="options" id="options">
         ${q.opciones.map((opt, i) => `
@@ -1023,7 +1210,7 @@ function renderQuestion() {
       </div>
     </div>
     <button class="btn-next" id="btn-next" onclick="nextQuestion()">
-      ${currentQ < total - 1 ? 'Siguiente pregunta →' : 'Ver resultados →'}
+      ${nextBtnLabel}
     </button>
   `;
 }
@@ -1080,8 +1267,10 @@ function answer(idx) {
 
 function nextQuestion() {
   currentQ++;
-  if (currentQ >= questions.length) {
+  if (currentQ >= TOTAL_QUESTIONS) {
     showResults();
+  } else if (currentQ % BLOCK_SIZE === 0) {
+    showBatchBreak();
   } else {
     renderQuestion();
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1090,9 +1279,10 @@ function nextQuestion() {
 
 function showResults() {
   document.getElementById('exam-area').style.display = 'none';
+  document.getElementById('batch-break').style.display = 'none';
   document.getElementById('results-area').style.display = 'block';
 
-  const total = questions.length;
+  const total = TOTAL_QUESTIONS;
   const pct = Math.round((score / total) * 100);
 
   const scoreEl = document.getElementById('final-score');
@@ -1117,6 +1307,8 @@ function restartExam() {
 
 function showConfig() {
   document.getElementById('results-area').style.display = 'none';
+  document.getElementById('batch-break').style.display = 'none';
+  document.getElementById('exam-area').style.display = 'none';
   document.getElementById('config-panel').style.display = 'block';
   document.getElementById('btn-generate').disabled = false;
   window.scrollTo({ top: 0, behavior: 'smooth' });
