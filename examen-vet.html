@@ -881,6 +881,10 @@ async function startExam() {
   // Save key locally
   localStorage.setItem('gemini_key', apiKey);
 
+  // Pick up to 5 random PDFs to keep context manageable
+  const shuffled = [...selected].sort(() => Math.random() - 0.5);
+  const toLoad = shuffled.slice(0, Math.min(5, shuffled.length));
+
   document.getElementById('config-panel').style.display = 'none';
   document.getElementById('loading').style.display = 'block';
   document.getElementById('btn-generate').disabled = true;
@@ -888,29 +892,18 @@ async function startExam() {
   const loadingSub = document.getElementById('loading-sub');
 
   try {
-    // Distribute 50 questions proportionally across all selected PDFs
-    // Each batch: max 4 PDFs at a time, generate questions proportionally
-    // Strategy: generate all 50 in one call using topic names + PDF knowledge
-    // Use file_data (URI) instead of base64 to avoid token limits
+    loadingSub.textContent = `Cargando ${toLoad.length} documentos de Supabase...`;
 
-    const topicNames = selected.map(p => p.name).join(', ');
-    const topicCount = selected.length;
-    const questionsPerTopic = Math.ceil(50 / topicCount);
-
-    loadingSub.textContent = `Preparando ${selected.length} temas seleccionados...`;
-
-    // Build parts: load up to 6 PDFs as base64, rest as topic names only
-    const shuffled = [...selected].sort(() => Math.random() - 0.5);
-    const toFetch = shuffled.slice(0, Math.min(6, shuffled.length));
-    const remaining = selected.filter(p => !toFetch.find(t => t.id === p.id));
-
+    // Fetch PDFs
     const parts = [];
-    for (const pdf of toFetch) {
-      loadingSub.textContent = `Cargando: ${pdf.name}...`;
+    for (const pdf of toLoad) {
+      loadingSub.textContent = `Leyendo: ${pdf.name}...`;
       const url = getPdfUrl(pdf.file);
       try {
         const b64 = await fetchPdfAsBase64(url);
-        parts.push({ inlineData: { mimeType: 'application/pdf', data: b64 } });
+        parts.push({
+          inlineData: { mimeType: 'application/pdf', data: b64 }
+        });
       } catch(e) {
         console.warn(`No se pudo cargar ${pdf.file}:`, e);
       }
@@ -918,36 +911,29 @@ async function startExam() {
 
     if (parts.length === 0) throw new Error('No se pudo cargar ningún PDF. Verifica que el bucket sea público.');
 
-    loadingSub.textContent = 'Generando exactamente 50 preguntas con Gemini...';
+    loadingSub.textContent = 'Generando 50 preguntas con Gemini...';
 
-    const remainingTopics = remaining.length > 0
-      ? `\n\nAdemás, incluye preguntas sobre estos temas adicionales del temario: ${remaining.map(p => p.name).join(', ')}.`
-      : '';
+    const topicNames = toLoad.map(p => p.name).join(', ');
+    const prompt = `Eres un profesor experto en veterinaria. Basándote ÚNICAMENTE en el contenido de los documentos PDF adjuntos sobre: ${topicNames}, genera exactamente 50 preguntas tipo test de nivel universitario en español.
 
-    const prompt = `Eres un profesor experto en veterinaria de urgencias y emergencias. Genera EXACTAMENTE 50 preguntas tipo test en español basadas en el temario de: ${topicNames}.${remainingTopics}
-
-INSTRUCCIÓN CRÍTICA: Debes generar EXACTAMENTE 50 objetos en el array. Ni más ni menos. Cuenta hasta 50 antes de terminar.
-
-FORMATO — responde SOLO con el array JSON, sin texto adicional, sin markdown:
+FORMATO ESTRICTO — responde SOLO con un array JSON válido, sin texto adicional, sin markdown, sin backticks:
 [
   {
-    "pregunta": "Texto de la pregunta sin saltos de linea",
+    "pregunta": "Texto de la pregunta",
     "opciones": ["A) opción 1", "B) opción 2", "C) opción 3", "D) opción 4"],
     "correcta": 0,
-    "explicacion": "Explicación sin saltos de linea."
+    "explicacion": "Explicación detallada de por qué la respuesta es correcta y por qué las demás son incorrectas."
   }
 ]
 
 REQUISITOS:
-- EXACTAMENTE 50 preguntas — este es el requisito más importante
-- Distribuye las preguntas entre todos los temas: ${topicNames}
+- Exactamente 50 preguntas
 - 4 opciones por pregunta (A, B, C, D)
-- "correcta" es el índice 0=A, 1=B, 2=C, 3=D
-- Preguntas variadas: diagnóstico, tratamiento, fisiopatología, farmacología
-- Dificultad mixta
-- Explicaciones concisas y útiles
-- Solo JSON puro, sin backticks, sin texto antes ni después
-- No uses saltos de linea dentro de los strings`;
+- "correcta" es el índice (0=A, 1=B, 2=C, 3=D)
+- Preguntas variadas: diagnóstico, tratamiento, fisiopatología, farmacología, valores de referencia
+- Dificultad mixta: algunas fáciles, la mayoría intermedias, algunas difíciles
+- Explicaciones claras y útiles para el estudio
+- CRÍTICO: devuelve SOLO el array JSON. Sin texto antes ni después. Sin comillas especiales. Usa solo comillas dobles estándar. No uses saltos de línea dentro de los valores de string.`;
 
     const body = {
       contents: [{
@@ -957,13 +943,13 @@ REQUISITOS:
         ]
       }],
       generationConfig: {
-        temperature: 0.4,
-        maxOutputTokens: 65536,
+        temperature: 0.7,
+        maxOutputTokens: 8192,
       }
     };
 
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
